@@ -1,0 +1,307 @@
+---
+title: "statistic mid-term"
+author: "TingHsuanChang"
+date: "5/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(fpc)
+library(dbscan)
+library(factoextra)#visualize clustering
+library(corrplot)
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(caret)
+library(Amelia)#EM imputation 
+library(cluster)
+library(VIM)#visualize missing data
+library(mice)# missing data imputation
+library(Gmedian)#k-median
+library(DescTools)#winsorize
+```
+
+# 匯入資料
+```{r}
+data_all=read_xlsx("/Users/changtinghsuan/Desktop/統算期中/spx.xlsx",sheet=1,col_names=TRUE,na="--")
+
+colnames(data_all)=c("Ticker","Name","Price","Debt_ratio","volatility","asset_turnover","profit_margin","fin_leverage","beta","volume","current_ratio","PE_ratio","market_cap","EPS","total_return")
+data_all$profit_margin=data_all$profit_margin/100
+data_all$total_return=data_all$total_return/100
+
+```
+
+# 資料預處理
+### detect the missing data and visualization
+```{r}
+mice_plot <- aggr(data_all[,3:15], col=c('navyblue','yellow'),
+    numbers=TRUE, sortVars=TRUE,
+    labels=names(data_all[,3:15]), cex.axis=.7,
+    gap=5, ylab=c("Missing data","Pattern"),)
+```
+
+The plot on the left shows the percentage of missing values for each variable
+The plot on the right shows the combination of missing values between variables
+
+因為current_ratio的missing data超過10%，因此drop current ratio 
+```{r}
+data_all=data_all[,-11]
+```
+
+
+## EDA
+
+```{r}
+data_raw=na.omit(data_all[,3:14])
+#data=scale(data_raw)
+#boxplot(data[,1:6])
+#boxplot(data[,7:12])
+
+pairs(data_raw)
+cor(data_raw,use = "everything") %>% corrplot(method="color",type="upper",title = "Correlation of features",mar=c(1,1,1,1), number.cex = .7,tl.col="black",rect.lwd=100,,tl.cex=1,addCoef.col = "grey")
+summary(data_raw)
+ggpairs(data_raw,columnLabels = c("price","debt","vola","AT","PM","finL","beta","volume","PE","Mcap","EPS","TRet") ,upper = list(continuous = "blank",combo = "blank"),)
+
+```
+
+
+
+## 補值
+### 用EM法補值
+Amelia就是屬於多重補值法的EM法，將有缺失值的樣本集分成m組，在針對各組用EMB算式算出m組平均值，個別去補每一組的遺失值。
+且資料集必須符合以下假設：
+1. 符合多重常態分配
+2. 遺失值符合自然隨機
+
+```{r}
+data_raw=data_all[,4:14] %>% as.data.frame()
+amelia_fit <- amelia(data_raw, m=5, parallel = "multicore")
+summary(amelia_fit)
+data_imputation=amelia_fit$imputations[[5]]
+data_new=data.frame(data_all[,1:2],data_imputation)
+```
+---------------------------------------------------------------
+### bagging樹補值法
+
+```{r}
+data_raw=data_all[,3:14]
+imputation_bag <- preProcess(data_raw,method = 'bagImpute')
+data_new <- predict(imputation_bag, data_raw)
+```
+
+
+
+
+### mice法補值
+在MICE裡面，提供了很多資料探勘的模型(linear regression, logistic regression, cart, random forest, boostrap……)，來針對遺漏值進行預測！
+
+概念很簡單：現在我們有欄位V1,V2,V3……Vn，每個欄位裡面都有遺漏值。
+
+當我們要填補V1的遺漏值時，就先把V2,V3……Vn的欄位當作自變數(X)，把V1當作應變數(Y)，並且進行建模，然後用預測的結果來填補V1的遺漏值。
+
+同理，針對V2，就用V1,V3……Vn建模，然後用預測的結果來填補V2的遺漏值。
+
+(由於這個函式，背後有使用Gibbs sampling(一種抽樣手法)。所以，即使使用某個模型進行遺漏值填補，也會因為抽樣手法，造成最後填補的結果有些許不同)
+
+```{r}
+data_raw=data_all[,3:14]
+
+mice.data<- mice(data = data_raw,
+                method = "rf", 
+                m = 5, #可以指定產生幾組預測果，預設為五組
+                maxit = 5, #可以指定迭代次數，預設為五次
+                seed=188)
+data_new<- complete(mice.data, 3) #Complete a data frame with missing combinations of data. 
+ 
+anyNA(data_new)
+```
+
+
+## Normalized 
+
+```{r}
+standard=preProcess(data_new,method = c("center","scale"),verbose = TRUE)
+df1=predict(standard,data_new)  
+boxplot(df1[,1:6])
+boxplot(df1[,7:12])
+```
+## Winsorized
+```{r}
+
+df2<-lapply(df1, Winsorize,probs = c(0.01,0.99))
+df2=as.data.frame(df2)
+```
+
+
+
+
+# Clustering
+## Partitional Clustering
+### K-means
+
+```{r}
+kmeans.cluster <- kmeans(df2, centers=3,nstart = 25) 
+kmeans.cluster
+# 視覺化 k-means 分群結果(基於ggplot2的語法)
+fviz_cluster(kmeans.cluster,           # 分群結果
+             data = df2,              # 資料
+             geom = c("point","text"), # 點和標籤(point & label)
+             frame.type = "norm")      # 框架型態
+
+```
+k-mean 易受離群值影響，分類的結果很差，改用k-medoid
+
+### k-mediod(euclidean)
+```{r}
+kmedoid.cluster_eu <- pam(x = df2, k=14,metric = "euclidean") 
+# 分群結果視覺化
+fviz_cluster(kmedoid.cluster_eu, data = df2,main = 'K-Medoid_euclidean')
+#繪製silhouette plot
+#plot(kmedoid.cluster_eu,which.plots = 2)
+```
+
+### K-mediod(manhattan distance)
+
+```{r}
+kmedoid.cluster_man <- pam(x = df2, k=14,metric = "manhattan") 
+# 分群結果視覺化
+fviz_cluster(kmedoid.cluster_man, data = df2,main = 'K-Medoid_manhattan',xlab ="PC1",ylab = "PC2" )
+#繪製silhouette plot
+#plot(kmedoid.cluster_man,which.plots = 2)
+```
+
+
+### 決定最適分群數目
+以下為3個常見決定最佳分群數的方法：
+
+Elbow Method（亦稱做Hartigan法）
+Average Silhouette method（側影圖法）
+Gap statistic（Gap統計量，predicted-observed）
+
+
+Elbow Method
+```{r}
+fviz_nbclust(x = df2,FUNcluster = pam, method = "wss",k.max = 30)
+```
+
+
+
+Average Silhouette Method=
+
+```{r}
+fviz_nbclust(df2, pam, method = "silhouette",print.summary=TRUE)
+```
+當k＝2，有最高的average silhouette width。
+
+Gap statistic
+
+```{r}
+# compute gap statistic
+set.seed(100)
+pam1 = function(x, k){list(cluster = pam(x,k, cluster.only=TRUE))}
+gap_stat <- clusGap(x = df2, FUNcluster= pam1,
+                    K.max = 20, B = 25)
+# Print the result
+print(gap_stat, method = "firstmax")
+
+fviz_gap_stat(gap_stat)
+```
+
+
+
+
+## Hierarchical Clustering
+
+### 1-1. 聚合式階層群聚法（AGNES, bottom-up）
+##### distance
+```{r}
+# 歐式距離
+E.dist <- dist(df2, method="euclidean") 
+#fviz_dist(dist.obj = E.dist, gradient = list(low = "#00AFBB", mid = "white", high = "#FC4E07"))
+#曼哈頓距離
+M.dist<-dist(df2,method = "manhattan")
+#fviz_dist(dist.obj=M.dist,gradient = list(low="#00AFBB", mid = "white", high = "#FC4E07"))
+```
+
+
+
+##### 歐式距離(ward法)
+```{r}
+h.E.Ward.cluster <- hclust(E.dist,method = "ward.D2")
+plot(h.E.Ward.cluster,xlab="Euclidean Distance")#畫出dendrogram
+#rect.hclust(tree =h.E.Ward.cluster, k = 12, border = "blue")
+#rect.hclust(tree =h.E.Ward.cluster, h = 10, border = "red")
+```
+
+```{r}
+cut.h.cluster <- cutree(tree = h.E.Ward.cluster, k = 8)
+#cut.h.cluster
+fviz_cluster(list(data = df2, cluster = cut.h.cluster),stand = TRUE,ellipse=TRUE)
+```
+
+
+
+
+##### 曼哈頓距離
+
+```{r}
+h.M.cluster <- hclust(M.dist,method="average") 
+plot(h.M.cluster, xlab="Manhattan Distance")
+#rect.hclust(tree =h.M.cluster, k = 3, border = "blue")
+#rect.hclust(tree =h.M.cluster, h = 10, border = "red")
+cut.h.M.cluster <- cutree(tree = h.M.cluster, k =8 )
+fviz_cluster(list(data = df2, cluster = cut.h.M.cluster))
+```
+
+### 1-2. 分裂式階層群聚法（DIANA, top-down）
+
+
+```{r}
+# compute divisive hierarchical clustering
+diana_clust <- diana(df2)
+# plot dendrogram
+pltree(diana_clust, cex = 0.6, hang = -1, main = "Dendrogram of diana")
+```
+
+```{r}
+diana_clust <- diana(df2)
+group <- cutree(diana_clust, k = 8)
+fviz_cluster(list(data = df2, cluster = group))
+```
+
+### 最適分群k選擇
+以下為3個常見決定最佳分群數的方法：
+Elbow Method（亦稱做Hartigan法）
+Average Silhouette method（側影圖法）
+Gap statistic（Gap統計量，predicted-observed）
+
+
+Elbow Method
+```{r}
+fviz_nbclust(df2, 
+             FUNcluster = hcut,  # hierarchical clustering
+             method = "wss",     # total within sum of square
+             k.max = 50         # max number of clusters to consider
+) + labs(title="Elbow Method for HC")     
+```
+
+Average Silhouette Method
+```{r}
+fviz_nbclust(x = df2,FUNcluster = hcut, method = "silhouette")
+```
+
+ Gap Statistic Method
+```{r}
+
+gap_stat <- clusGap(x = df2,FUNcluster = hcut, nstart = 25, K.max = 10, B = 50)
+fviz_gap_stat(gap_stat)
+```
+ 
+
+
